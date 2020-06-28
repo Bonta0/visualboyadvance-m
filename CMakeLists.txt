@@ -700,11 +700,15 @@ elseif(MSVC)
     # first remove all warnings flags, otherwise there is a warning about overriding them
     string(REGEX REPLACE "/[Ww][^ ]+" "" CMAKE_C_FLAGS   ${CMAKE_C_FLAGS})
     string(REGEX REPLACE "/[Ww][^ ]+" "" CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS})
-
+    
+    add_link_options(/DEBUG)
     if(CMAKE_BUILD_TYPE STREQUAL Debug)
         add_compile_options(/W4)
+        add_compile_options(/Zi)
     else()
         add_compile_options(/w)
+        add_compile_options(/Z7)
+        add_compile_options(/MP /GS- /Gy- /Gm- /O2 /Ob2 /Zc:inline /Oy /Oi)
 
         if(ENABLE_LTO)
             add_compile_options(/GL)

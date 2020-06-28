@@ -109,6 +109,8 @@ extern bool cpuFlashEnabled;
 extern bool cpuEEPROMEnabled;
 extern bool cpuEEPROMSensorEnabled;
 
+extern uint16_t DolphinPad;
+
 #ifdef BKPT_SUPPORT
 extern uint8_t freezeWorkRAM[0x40000];
 extern uint8_t freezeInternalRAM[0x8000];

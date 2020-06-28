@@ -3661,15 +3661,20 @@ void CPUInterrupt()
     biosProtected[3] = 0xe5;
 }
 
+uint16_t DolphinPad;
 static uint32_t joy;
 static bool has_frames;
 
 static void gbaUpdateJoypads(void)
 {
     // update joystick information
-    if (systemReadJoypads())
+    if (linkMode == LinkMode::LINK_GAMECUBE_DOLPHIN) {
+        joy = (uint32_t)DolphinPad;
+    }
+    else if (systemReadJoypads()) {
         // read default joystick
         joy = systemReadJoypad(-1);
+    }
 
     P1 = 0x03FF ^ (joy & 0x3FF);
     systemUpdateMotionSensor();

@@ -1,28 +1,45 @@
 #pragma once
 
-#include "../common/Types.h"
+#include <array>
+#include <queue>
+#include <vector>
 
 #include <SFML/Network.hpp>
+
+#include "../common/Types.h"
+
+struct GBAPacket {
+    std::array<uint8_t, 5> data;
+    uint64_t time;
+    uint16_t pad;
+};
 
 class GBASockClient {
 public:
     GBASockClient(sf::IpAddress _server_addr);
     ~GBASockClient();
 
-    bool Connect(sf::IpAddress server_addr);
-    void Send(std::vector<char> data);
-    char ReceiveCmd(char* data_in, bool block);
-    void ReceiveClock(bool block);
+    void Send(std::vector<uint8_t> data, uint64_t recvd_time);
+    bool ReceiveCmd(GBAPacket& cmd, bool block);
 
-    void ClockSync(uint32_t ticks);
     void Disconnect();
-    bool IsDisconnected();
+
+    bool IsDisconnected() {
+        return is_disconnected;
+    }
+
+    bool IsMovie() {
+        return is_movie;
+    }
 
 private:
+    void ReceivePackets(bool block);
+
     sf::IpAddress server_addr;
     sf::TcpSocket client;
-    sf::TcpSocket clock_client;
 
-    int32_t clock_sync;
-    bool is_disconnected;
+    std::queue<GBAPacket> cmds;
+
+    bool is_disconnected = true;
+    bool is_movie = false;
 };

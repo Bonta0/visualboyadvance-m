@@ -211,10 +211,8 @@ const uint64_t TICKS_PER_FRAME = TICKS_PER_SECOND / 60;
 const uint64_t BITS_PER_SECOND = 115200;
 const uint64_t BYTES_PER_SECOND = BITS_PER_SECOND / 8;
 
-static uint32_t lastjoybusupdate = 0;
-static uint32_t nextjoybusupdate = 0;
-static uint32_t lastcommand = 0;
-static bool booted = false;
+static uint64_t lastjoybusupdate = 0;
+static uint64_t nextjoybusupdate = 0;
 
 static ConnectionState JoyBusConnect();
 static void JoyBusUpdate(int ticks);
@@ -1274,10 +1272,21 @@ void CleanLocalLink()
 #endif
 }
 
+static bool has_cmd;
+static GBAPacket last_cmd;
+static uint64_t lastcommand;
+static int64_t dolphin_time;
+
 static ConnectionState JoyBusConnect()
 {
     delete dol;
     dol = NULL;
+
+    has_cmd = false;
+    lastcommand = 0;
+    dolphin_time = 0;
+
+    gba_joybus_active = true;
 
     dol = new GBASockClient(joybusHostAddr);
     if (dol) {
@@ -1290,48 +1299,64 @@ static ConnectionState JoyBusConnect()
 static void JoyBusUpdate(int ticks)
 {
     lastjoybusupdate += ticks;
-    lastcommand += ticks;
 
-    bool joybus_activated = ((READ16LE(&ioMem[COMM_RCNT])) >> 14) == 3;
-    gba_joybus_active = dol && gba_joybus_enabled && joybus_activated;
+    if ((lastjoybusupdate >= nextjoybusupdate)) {
+        if (dol->IsDisconnected()) {
+            return;
+        }
 
-    if ((lastjoybusupdate > nextjoybusupdate)) {
-        if (!joybus_activated) {
-            if (dol && booted) {
-                JoyBusShutdown();
+        lastcommand += lastjoybusupdate;
+        dolphin_time -= static_cast<int64_t>(lastjoybusupdate);
+        lastjoybusupdate = 0;
+
+        GBAPacket packet;
+        if (dol->IsMovie()) {
+            if (!has_cmd) {
+                if (!dol->ReceiveCmd(packet, true))
+                    return;
+                has_cmd = true;
+                last_cmd = packet;
+                dolphin_time += static_cast<int64_t>(packet.time);
             }
 
-            lastjoybusupdate = 0;
+            if (dolphin_time > 0) {
+                nextjoybusupdate = static_cast<uint64_t>(dolphin_time);
+                return;
+            }
+
+            packet = last_cmd;
             nextjoybusupdate = 0;
+            has_cmd = false;
+        }
+        else {
+            bool block = dolphin_time < 0;
+            bool recvd_cmd = dol->ReceiveCmd(packet, block);
+            if (dol->IsDisconnected()) {
+                return;
+            }
+
+            if (!recvd_cmd) {
+                nextjoybusupdate = TICKS_PER_SECOND / 40000;
+                return;
+            }
+
+            dolphin_time += static_cast<int64_t>(packet.time);
+
+            nextjoybusupdate = TICKS_PER_SECOND / BYTES_PER_SECOND;
+            /*if (dolphin_time >= static_cast<int64_t>(TICKS_PER_FRAME / 3))
+                nextjoybusupdate = dolphin_time;*/
+        }
+
+        std::vector<uint8_t> resp;
+
+        DolphinPad = packet.pad;
+        const uint8_t cmd = packet.data[0];
+
+        bool joybus_activated = ((READ16LE(&ioMem[COMM_RCNT])) >> 14) == 3;
+        if (!joybus_activated) {
+            dol->Send(resp, lastcommand);
             lastcommand = 0;
             return;
-        }
-
-        if (!dol) {
-            booted = false;
-            JoyBusConnect();
-        }
-
-        dol->ReceiveClock(false);
-
-        if (dol->IsDisconnected()) {
-            JoyBusShutdown();
-            nextjoybusupdate = TICKS_PER_SECOND * 2; // try to connect after 2 seconds
-            lastjoybusupdate = 0;
-            lastcommand = 0;
-            return;
-        }
-
-        dol->ClockSync(lastjoybusupdate);
-
-        char data[5] = { 0x10, 0, 0, 0, 0 }; // init with invalid cmd
-        std::vector<char> resp;
-        uint8_t cmd = 0x10;
-
-        if (lastcommand > (TICKS_PER_FRAME * 4)) {
-            cmd = dol->ReceiveCmd(data, true);
-        } else {
-            cmd = dol->ReceiveCmd(data, false);
         }
 
         switch (cmd) {
@@ -1339,14 +1364,11 @@ static void JoyBusUpdate(int ticks)
             UPDATE_REG(COMM_JOYCNT, READ16LE(&ioMem[COMM_JOYCNT]) | JOYCNT_RESET);
             resp.push_back(0x00); // GBA device ID
             resp.push_back(0x04);
-            nextjoybusupdate = TICKS_PER_SECOND / BYTES_PER_SECOND;
             break;
 
         case JOY_CMD_STATUS:
             resp.push_back(0x00); // GBA device ID
             resp.push_back(0x04);
-
-            nextjoybusupdate = TICKS_PER_SECOND / BYTES_PER_SECOND;
             break;
 
         case JOY_CMD_READ:
@@ -1356,33 +1378,24 @@ static void JoyBusUpdate(int ticks)
             resp.push_back((uint8_t)(READ16LE(&ioMem[COMM_JOY_TRANS_H]) >> 8));
 
             UPDATE_REG(COMM_JOYCNT, READ16LE(&ioMem[COMM_JOYCNT]) | JOYCNT_SEND_COMPLETE);
-            nextjoybusupdate = TICKS_PER_SECOND / BYTES_PER_SECOND;
-            booted = true;
             break;
 
         case JOY_CMD_WRITE:
-            UPDATE_REG(COMM_JOY_RECV_L, (uint16_t)((uint16_t)data[2] << 8) | (uint8_t)data[1]);
-            UPDATE_REG(COMM_JOY_RECV_H, (uint16_t)((uint16_t)data[4] << 8) | (uint8_t)data[3]);
+            UPDATE_REG(COMM_JOY_RECV_L, (uint16_t)((uint16_t)packet.data[2] << 8) | (uint8_t)packet.data[1]);
+            UPDATE_REG(COMM_JOY_RECV_H, (uint16_t)((uint16_t)packet.data[4] << 8) | (uint8_t)packet.data[3]);
             UPDATE_REG(COMM_JOYSTAT, READ16LE(&ioMem[COMM_JOYSTAT]) | JOYSTAT_RECV);
             UPDATE_REG(COMM_JOYCNT, READ16LE(&ioMem[COMM_JOYCNT]) | JOYCNT_RECV_COMPLETE);
-            nextjoybusupdate = TICKS_PER_SECOND / BYTES_PER_SECOND;
-            booted = true;
             break;
-
-        default:
-            nextjoybusupdate = TICKS_PER_SECOND / 40000;
-            lastjoybusupdate = 0;
-            return; // ignore
         }
 
-        lastjoybusupdate = 0;
         resp.push_back((uint8_t)READ16LE(&ioMem[COMM_JOYSTAT]));
 
         if (cmd == JOY_CMD_READ) {
             UPDATE_REG(COMM_JOYSTAT, READ16LE(&ioMem[COMM_JOYSTAT]) & ~JOYSTAT_SEND);
         }
 
-        dol->Send(resp);
+        dol->Send(resp, lastcommand);
+        lastcommand = 0;
 
         // Generate SIO interrupt if we can
         if (((cmd == JOY_CMD_RESET) || (cmd == JOY_CMD_READ) || (cmd == JOY_CMD_WRITE))
@@ -1390,13 +1403,13 @@ static void JoyBusUpdate(int ticks)
             IF |= 0x80;
             UPDATE_REG(0x202, IF);
         }
-
-        lastcommand = 0;
     }
 }
 
 static void JoyBusShutdown()
 {
+    gba_joybus_active = false;
+
     delete dol;
     dol = NULL;
 }

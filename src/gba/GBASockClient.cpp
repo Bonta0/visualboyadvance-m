@@ -1,5 +1,7 @@
 #ifndef NO_LINK
 
+#include <array>
+
 #include "GBASockClient.h"
 
 // Currently only for Joybus communications
@@ -14,85 +16,78 @@ GBASockClient::GBASockClient(sf::IpAddress _server_addr)
     client.connect(server_addr, 0xd6ba);
     client.setBlocking(false);
 
-    clock_client.connect(server_addr, 0xc10c);
-    clock_client.setBlocking(false);
+    ReceivePackets(true);
 
-    clock_sync = 0;
     is_disconnected = false;
 }
 
 GBASockClient::~GBASockClient()
 {
-    client.disconnect();
-    clock_client.disconnect();
+    Disconnect();
 }
 
-uint32_t clock_sync_ticks = 0;
-
-void GBASockClient::Send(std::vector<char> data)
-{
-    char* plain_data = new char[data.size()];
-    std::copy(data.begin(), data.end(), plain_data);
-
-    client.send(plain_data, data.size());
-
-    delete[] plain_data;
-}
-
-// Returns cmd for convenience
-char GBASockClient::ReceiveCmd(char* data_in, bool block)
-{
-    if (IsDisconnected())
-        return data_in[0];
-
-    std::size_t num_received = 0;
-    if (block || clock_sync == 0) {
+void GBASockClient::ReceivePackets(bool block) {
+    if (block) {
         sf::SocketSelector Selector;
         Selector.add(client);
-        Selector.wait(sf::seconds(6));
+        Selector.wait();
     }
-    if (client.receive(data_in, 5, num_received) == sf::Socket::Disconnected)
-        Disconnect();
 
-    return data_in[0];
+    sf::Packet packet;
+    auto res = client.receive(packet);
+    if (res != sf::Socket::Done && (block || res != sf::Socket::NotReady)) {
+        Disconnect();
+        return;
+    }
+
+    if (IsDisconnected()) {
+        packet >> is_movie;
+    }
+    while (!packet.endOfPacket()) {
+        GBAPacket cmd;
+        packet >> cmd.data[0] >> cmd.data[1] >> cmd.data[2] >> cmd.data[3] >> cmd.data[4] >> cmd.time >> cmd.pad;
+        cmds.emplace(std::move(cmd));
+    }
 }
 
-void GBASockClient::ReceiveClock(bool block)
+void GBASockClient::Send(std::vector<uint8_t> data, uint64_t recvd_time)
 {
-    (void)block; // unused param
-    if (IsDisconnected())
+    if (IsMovie())
         return;
 
-    char sync_ticks[4] = { 0, 0, 0, 0 };
-    std::size_t num_received = 0;
-    if (clock_client.receive(sync_ticks, 4, num_received) == sf::Socket::Disconnected)
-        Disconnect();
+    if (data.size() > std::numeric_limits<uint8_t>::max())
+        return;
 
-    if (num_received == 4) {
-        clock_sync_ticks = 0;
-        for (int i = 0; i < 4; i++)
-            clock_sync_ticks |= (uint8_t)(sync_ticks[i]) << ((3 - i) * 8);
-        clock_sync += clock_sync_ticks;
-    }
+    sf::Packet packet;
+    packet << static_cast<uint8_t>(data.size());
+    for (auto b : data)
+        packet << b;
+    packet << recvd_time;
+
+    client.send(packet);
 }
 
-void GBASockClient::ClockSync(uint32_t ticks)
+bool GBASockClient::ReceiveCmd(GBAPacket& cmd, bool block)
 {
-    if (clock_sync > (int32_t)ticks)
-        clock_sync -= (int32_t)ticks;
-    else
-        clock_sync = 0;
+    if (IsDisconnected())
+        return false;
+
+    ReceivePackets(block && cmds.empty());
+    if (IsDisconnected())
+        return false;
+
+    if (cmds.empty())
+        return false;
+
+    cmd = cmds.front();
+    cmds.pop();
+
+    return true;
 }
 
 void GBASockClient::Disconnect()
 {
     is_disconnected = true;
     client.disconnect();
-    clock_client.disconnect();
-}
-
-bool GBASockClient::IsDisconnected()
-{
-    return is_disconnected;
 }
 #endif // NO_LINK
